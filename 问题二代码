@@ -1,0 +1,142 @@
+clear; clc; close all;
+
+%% 1. 参数初始化
+lr = 1.2;
+lf = 1.2;
+track_width = 1.84; % 轮距
+alpha = 0.4;
+delta_max = deg2rad(26.32); % 转换为弧度
+v0 = 5.56;
+a_acc = 0; % 加速度为0
+total_time = 10;
+dt = 0.1;
+t = 0:dt:total_time;
+
+% 初始状态 [X, Y, psi]
+% 以质心初始位置为原点，航向角为0
+X = zeros(size(t));
+Y = zeros(size(t));
+psi = zeros(size(t));
+
+% 随体坐标系下的四个轮毂坐标 z = x + yi
+% x: 横向(左右), y: 纵向(前后)
+z_FL = -0.92 + 1.2i; % 左前
+z_FR = 0.92 + 1.2i;  % 右前
+z_RL = -0.92 - 1.2i; % 左后
+z_RR = 0.92 - 1.2i;  % 右后
+z_CoM = 0 + 0i;      % 质心在随体坐标系下就是原点
+
+%% 2. 求解最大曲率 kappa_m_max
+kappa_m_max = (1/lr) * sin(atan((lr/(lr+lf)) * tan(delta_max)));
+
+%% 3. 步进迭代求解
+% 存储全局坐标 (复数形式)
+Z_FL_all = zeros(size(t));
+Z_FR_all = zeros(size(t));
+Z_RL_all = zeros(size(t));
+Z_RR_all = zeros(size(t));
+Z_CoM_all = zeros(size(t));
+
+fprintf('时间(s)\t 左前(X,Y)\t\t 右前(X,Y)\t\t 左后(X,Y)\t\t 右后(X,Y)\t\t 质心(X,Y)\n');
+
+for k = 1:length(t)
+    curr_t = t(k);
+    v = v0 + a_acc * curr_t;
+    
+    % 计算当前曲率和质心侧偏角 beta
+    kappa_m = kappa_m_max * (1 - exp(-alpha * v * curr_t));
+    beta = asin(lr * kappa_m);
+    
+    % 计算当前各点全局坐标: Z = [X+Yi] + z * e^(-i*psi)
+    Z_center = X(k) + Y(k)*1i;
+    Z_FL_all(k)  = Z_center + z_FL  * exp(1i * psi(k));
+    Z_FR_all(k)  = Z_center + z_FR  * exp(1i * psi(k));
+    Z_RL_all(k)  = Z_center + z_RL  * exp(1i * psi(k));
+    Z_RR_all(k)  = Z_center + z_RR  * exp(1i * psi(k));
+    Z_CoM_all(k) = Z_center + z_CoM * exp(1i * psi(k));
+    
+    % 打印坐标
+    fprintf('%.1f\t(%.2f,%.2f)\t(%.2f,%.2f)\t(%.2f,%.2f)\t(%.2f,%.2f)\t(%.2f,%.2f)\n', ...
+        curr_t, real(Z_FL_all(k)), imag(Z_FL_all(k)), ...
+        real(Z_FR_all(k)), imag(Z_FR_all(k)), ...
+        real(Z_RL_all(k)), imag(Z_RL_all(k)), ...
+        real(Z_RR_all(k)), imag(Z_RR_all(k)), ...
+        real(Z_CoM_all(k)), imag(Z_CoM_all(k)));
+    
+    % 状态更新 (欧拉法)
+    if k < length(t)
+        psi_dot = (v / lr) * sin(beta);
+        X_dot = -v * sin(psi(k) + beta);
+        Y_dot = v * cos(psi(k) + beta);
+        
+        psi(k+1) = psi(k) + psi_dot * dt;
+        X(k+1) = X(k) + X_dot * dt;
+        Y(k+1) = Y(k) + Y_dot * dt;
+    end
+end
+
+%% 4. 绘图
+figure('Units', 'normalized', 'Position', [0.1, 0.1, 0.8, 0.7], 'Color', 'w');
+
+titles = {'前内轮中心', '前外轮中心', '后内轮中心', '后外轮中心', '车辆中心'};
+data = {Z_FL_all, Z_FR_all, Z_RL_all, Z_RR_all, Z_CoM_all};
+colors = {'r', 'b', 'g', 'm', 'k'};
+
+% 绘制 5 张独立轨迹子图
+for i = 1:5
+    subplot(2, 3, i);
+    plot(real(data{i}), imag(data{i}), colors{i}, 'LineWidth', 1.5);
+    title(titles{i});
+    xlabel('Global X (m)'); ylabel('Global Y (m)');
+    grid on; axis equal;
+end
+
+% 绘制第 6 张大图：合并轨迹 + 初始矩形框
+subplot(2, 3, 6);
+hold on;
+p1 = plot(real(Z_FL_all), imag(Z_FL_all), 'r-', 'LineWidth', 1);
+p2 = plot(real(Z_FR_all), imag(Z_FR_all), 'b-', 'LineWidth', 1);
+p3 = plot(real(Z_RL_all), imag(Z_RL_all), 'g-', 'LineWidth', 1);
+p4 = plot(real(Z_RR_all), imag(Z_RR_all), 'm-', 'LineWidth', 1);
+p5 = plot(real(Z_CoM_all), imag(Z_CoM_all), 'k--', 'LineWidth', 1.5);
+
+% 绘制起始位置的黑色矩形轮廓 (t=0)
+% 顺序：左前 -> 右前 -> 右后 -> 左后 -> 左前
+rect_x = [real(Z_FL_all(1)), real(Z_FR_all(1)), real(Z_RR_all(1)), real(Z_RL_all(1)), real(Z_FL_all(1))];
+rect_y = [imag(Z_FL_all(1)), imag(Z_FR_all(1)), imag(Z_RR_all(1)), imag(Z_RL_all(1)), imag(Z_FL_all(1))];
+plot(rect_x, rect_y, 'k-', 'LineWidth', 2, 'DisplayName', '初始轮廓');
+
+title('全轨迹合并');
+xlabel('Global X (m)'); ylabel('Global Y (m)');
+legend([p1, p2, p3, p4, p5], {'FI', 'FO', 'RI', 'RO', 'CoM'}, 'Location', 'best');
+grid on; axis equal;
+hold off;
+%% 1. 数据整合与四舍五入 (保留两位小数)
+time_col = t';
+CoM_xy = [real(Z_CoM_all)', imag(Z_CoM_all)']; 
+Fin_xy = [real(Z_FR_all)',  imag(Z_FR_all)'];  
+Fout_xy = [real(Z_FL_all)', imag(Z_FL_all)']; 
+Bin_xy = [real(Z_RR_all)',  imag(Z_RR_all)'];  
+Bout_xy = [real(Z_RL_all)', imag(Z_RL_all)']; 
+
+% 将所有数值合并成大矩阵
+data_matrix = [time_col, CoM_xy, Fin_xy, Fout_xy, Bin_xy, Bout_xy];
+
+% --- 关键修改：四舍五入到小数点后两位 ---
+data_matrix = round(data_matrix, 2);
+
+%% 2. 构建双行表头
+header1 = {'时间/s', '车辆中心', '', '前内轮中心', '', '前外轮中心', '', '后内轮中心', '', '后外轮中心', ''};
+header2 = {'', 'x/m', 'y/m', 'x/m', 'y/m', 'x/m', 'y/m', 'x/m', 'y/m', 'x/m', 'y/m'};
+
+% 转为 cell 格式
+data_cell = num2cell(data_matrix);
+final_output = [header1; header2; data_cell];
+
+%% 3. 写入 Excel
+filename = 'Vehicle_Trajectory_Final.xlsx';
+
+% 如果 Excel 文件已打开，记得先关闭它，否则会报错
+writecell(final_output, filename);
+
+fprintf('精简版数据（两位小数）已成功生成到: %s\n', filename);
