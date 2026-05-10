@@ -1,0 +1,173 @@
+clear; clc; close all;
+
+%% 1. 基础尺寸与物理参数
+L = 2.4; W_track = 1.84;    % 轴距与轮距
+v = 1;                      % 停车场限速 (m/s)
+dt = 0.05; 
+alpha = 1.5;                % 响应系数
+car_w = 2.0; car_h = 4.0;   % 车辆尺寸
+lr = 1.2;                   % 质心至后轴距离
+
+% 障碍物约束边界
+slot_top_y = 2.65;          % 初始车位上边缘
+aisle_top_y = 8.15;         % 通道上边缘 (2.65 + 5.5)
+neighbor_right_x = 1.2;     % 右侧邻车左边缘
+G_point = [-1.4, 2];        % 左侧邻车右上角 (危险内切点)
+
+%% 2. 极值搜索
+d_list = 1.0:0.01:5.5;      % 直行距离搜索范围
+di_list = 20:0.01:30.47;        % 内轮转角搜索范围 (deg)
+feasible_results = [];
+
+fprintf('正在计算可行域并集成停车场场景...\n');
+for d = d_list
+    for di_deg = di_list
+        di = deg2rad(di_deg);
+        delta = acot(cot(di) + W_track/(2*L));
+        k_max = (1/lr) * sin(atan((lr/L) * tan(delta)));
+        
+        [safe, ~] = check_collision_integrated(d, k_max, v, dt, alpha, lr, G_point, neighbor_right_x, aisle_top_y);
+        if safe
+            feasible_results = [feasible_results; d, di_deg];
+        end
+    end
+end
+
+if isempty(feasible_results)
+    error('在当前 alpha 下未找到可行解。建议调整 alpha 或减小邻车宽度。');
+end
+
+% === 修改点：提取极值并计算 d 的范围 ===
+% 1. 找到全局的最小和最大转角
+min_angle = min(feasible_results(:,2)); 
+max_angle = max(feasible_results(:,2));
+
+% 2. 提取对应转角下的所有 d 值
+d_for_min_angle = feasible_results(feasible_results(:,2) == min_angle, 1);
+d_for_max_angle = feasible_results(feasible_results(:,2) == max_angle, 1);
+
+% 3. 计算 d 的范围 [最小值, 最大值]
+d_min_range = [min(d_for_min_angle), max(d_for_min_angle)];
+d_max_range = [min(d_for_max_angle), max(d_for_max_angle)];
+
+fprintf('\n=== 极值计算结果 ===\n');
+fprintf('第一组 (最大角度方案): 内轮转角 = %.2f deg, 直行距离 d 的可行范围 = [%.2f, %.2f] m\n', ...
+    max_angle, d_max_range(1), d_max_range(2));
+fprintf('第二组 (最小角度方案): 内轮转角 = %.2f deg, 直行距离 d 的可行范围 = [%.2f, %.2f] m\n', ...
+    min_angle, d_min_range(1), d_min_range(2));
+
+%% 3. 绘图展示
+% 为了绘图代表性，我们选取可行范围的中值点进行画图
+data_max_plot = [mean(d_max_range), max_angle];
+data_min_plot = [mean(d_min_range), min_angle];
+
+visualize_result(data_max_plot, alpha, lr, sprintf('最大转角(%.1f°) 出库包络 (d=%.2fm)', max_angle, data_max_plot(1)));
+visualize_result(data_min_plot, alpha, lr, sprintf('最小转角(%.1f°) 出库包络 (d=%.2fm)', min_angle, data_min_plot(1)));
+
+%% ================== 核心函数 ==================
+function [safe, traj] = check_collision_integrated(d, k_max, v, dt, alpha, lr, G, r_x, top_y)
+    X = 0; Y = 0; psi = 0; s = 0; safe = true; traj = [];
+    
+    % --- 阶段1: 直行阶段 ---
+    while Y < d
+        Y = Y + v * dt;
+        traj = [traj; X, Y, psi];
+    end
+    
+    % --- 阶段2: 转向阶段 ---
+    while psi < pi/2
+        s = s + v * dt;
+        km = k_max * (1 - exp(-alpha * s));
+        beta = asin(lr * km);
+        
+        % 运动学更新
+        X = X - v * sin(psi + beta) * dt; % 向左偏
+        Y = Y + v * cos(psi + beta) * dt;
+        psi = psi + (v/lr) * sin(beta) * dt;
+        
+        traj = [traj; X, Y, psi];
+        
+        % 角点映射 (复数算子)
+        rot = exp(1i * psi);
+        Z_center = X + 1i*Y;
+        pts = [1+2i, -1+2i, -1-2i, 1-2i]; % [右前, 左前, 左后, 右后]
+        C = Z_center + pts * rot;
+        
+        % 1. 撞对面约束 (外冲)
+        if any(imag(C) > top_y)
+            safe = false; 
+            % break; % 为了显示完整包络线，绘图时建议注释掉此行
+        end
+        
+        % 2. 撞右邻约束 (回摆)
+        if any(imag(C) < 2.65 & real(C) > r_x)
+            safe = false; 
+            % break; 
+        end
+        
+        % 3. 左侧内切约束 (关键修改点)
+        cFL = Z_center + (-1+2i)*rot; % 左前点
+        cRL = Z_center + (-1-2i)*rot; % 左后点
+        V_side = cFL - cRL; 
+        V_G = (G(1) + 1i*G(2)) - cRL;
+        
+        % 判定逻辑：只有当车尾(cRL)还没过G点的高度时，才进行叉乘判定
+        if imag(cRL) <= G(2)
+            % 叉乘小于0说明点G在车身左边缘的右侧（即切入车体）
+            if real(V_side)*imag(V_G) - imag(V_side)*real(V_G) < 0
+                safe = false; 
+                % break; % 这里同样注释掉，以画出完整轨迹
+            end
+        end
+    end
+end
+
+function visualize_result(data, alpha, lr, title_str)
+    figure('Color', 'w', 'Name', title_str); hold on; axis equal; grid on;
+    
+    % --- 调用你提供的停车场场景绘制逻辑 ---
+    slot_w = 2.4; slot_h = 5.3; aisle_w = 5.5;
+    centers_x = [-2.4, 0, 2.4];
+    
+    for row = 1:2
+        % --- 修改点：重新定义两排车位的起始纵坐标 ---
+        if row == 1
+            curr_slot_y = -2.65; % 第一排（目标车所在行）保持不变
+        else
+            curr_slot_y = 8.15;  % 第二排（对面行）向上平移至通道上边界
+        end
+        
+        for i = 1:3
+            % 绘制车位线
+            rectangle('Position', [centers_x(i)-1.2, curr_slot_y, 2.4, 5.3], 'LineStyle', '--');
+            
+            % 绘制静态邻车
+            if ~(row==1 && i==2) 
+                % 车辆相对于车位框的相对位置保持一致
+                % 这里的 2.65-2 是为了让 4m 长的车居中停放在车位里
+                rectangle('Position', [centers_x(i)-1.0, curr_slot_y + 2.65 - 2, 2.0, 4.0], 'EdgeColor', [0.5 0.5 0.5]);
+            end
+        end
+    end
+    
+    % --- 绘制 A 车转向轨迹与包络 ---
+    d = data(1); di = deg2rad(data(2));
+    L = 2.4; W = 1.84;
+    delta = acot(cot(di) + W/(2*L));
+    k_max = (1/lr) * sin(atan(0.5 * tan(delta)));
+    
+    % 注意：绘图时调用你手绘的修改版 G_point = [-1.4, 2]
+    [~, traj] = check_collision_integrated(d, k_max, 1.0, 0.05, alpha, lr, [-1.4, 2], 1.2, 8.15);
+    
+    % 绘制包络 (每隔8帧画一个框)
+    z_box = [1+2i, -1+2i, -1-2i, 1-2i, 1+2i];
+    for k = 1:8:size(traj,1)
+        p = traj(k,:);
+        rot = exp(1i * p(3));
+        pts = (p(1) + 1i*p(2)) + z_box * rot;
+        fill(real(pts), imag(pts), 'b', 'FaceAlpha', 0.08, 'EdgeColor', 'none');
+    end
+    plot(traj(:,1), traj(:,2), 'r', 'LineWidth', 2);
+    title(title_str); xlabel('X (m)'); ylabel('Y (m)');
+    xlim([-8 5]); ylim([-3 14]);
+end
